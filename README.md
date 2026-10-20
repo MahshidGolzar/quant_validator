@@ -11,8 +11,35 @@ Hardware accelerators are often fast specifically because they run low-precision
 - `QuantParams` — a scale and zero-point, the two numbers that define an affine mapping between float and int8 (`int8_value = round(float_value / scale) + zero_point`).
 - `quantize_value` / `dequantize_value` — the conversion in each direction, for one value.
 - `quantize` / `dequantize` — the same, applied to a whole vector.
-- `quantized_multiply` — a small quantized elementwise multiply "op", the kind of thing a framework's accelerator backend implements for a layer.
-- A tiny test "framework" (`check()`, pass/fail reporting) with 10 checks.
+- `quantized_multiply` — a small quantized elementwise multiply "op", the kind of thing a framework's accelerator backend implements for a layer. For readability this dequantizes, multiplies in float, then re-quantizes the result; a real accelerator kernel computes the mathematical equivalent in pure integer arithmetic for speed.
+- A tiny test "framework" (`check()`, pass/fail reporting) with 10 checks: round-trip accuracy within the expected rounding error, out-of-range clamping, and the quantized multiply op checked against the plain float32 reference calculation.
+
+## The bug this project's tests caught
+
+The first version of `quantize_value` computed the int8 value but never checked it was actually representable:
+
+```cpp
+int q = static_cast<int>(std::round(x / qp.scale)) + qp.zero_point;
+return static_cast<int8_t>(q);   // BUG: q might be outside [-128, 127]
+```
+
+int8 can only represent -128 to 127. Casting an out-of-range `int` down to `int8_t` doesn't raise an error or produce an obviously-wrong number — it silently wraps around. Concretely: quantizing `20.0f` with this scale produced `q = 200`, and `static_cast<int8_t>(200)` came out as **-56**, not some obviously-broken giant number. A large, clearly-positive input silently became a plausible-looking, completely wrong *negative* value — exactly the kind of bug that's dangerous precisely because it doesn't look broken.
+
+The two clamping tests (`"extreme positive value clamps to int8 max (127)"`, `"extreme ... min (-128)"`) failed against this version, which is what caught it. The fix adds the missing bound:
+
+```cpp
+int q = static_cast<int>(std::round(x / qp.scale)) + qp.zero_point;
+q = std::clamp(q, -128, 127);
+return static_cast<int8_t>(q);
+```
+
+The real commit history (`git log -p`) shows this: a first commit with the bug and the two clamping tests already failing, then a second commit that adds one line and turns all 10 checks green.
+
+## Known limitations
+
+- `quantized_multiply` dequantizes to float internally rather than doing the integer-only arithmetic a real accelerator kernel would use — chosen deliberately for readability over realism.
+- Only elementwise multiply is implemented; no quantized add, matmul, or convolution.
+- Single, fixed quantization parameters per tensor (no per-channel scales, which real frameworks often use for better accuracy).
 
 ## Building and running
 

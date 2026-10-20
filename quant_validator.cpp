@@ -30,6 +30,7 @@ struct QuantParams {
 
 int8_t quantize_value(float x, const QuantParams &qp) {
   int q = static_cast<int>(std::round(x / qp.scale)) + qp.zero_point;
+  q = std::clamp(q, -128, 127);  // int8's representable range
   return static_cast<int8_t>(q);
 }
 
