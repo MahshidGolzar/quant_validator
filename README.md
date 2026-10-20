@@ -1,12 +1,12 @@
-# quant_validator — int8 quantization, validated
+# quant_validator — int8 quantization with tests
 
 [![CI](https://github.com/MahshidGolzar/quant_validator/actions/workflows/ci.yml/badge.svg)](https://github.com/MahshidGolzar/quant_validator/actions/workflows/ci.yml)
 
-A small, from-scratch int8 quantization validator in C++: converting float32 values to int8 and back (and a quantized "multiply" op), with a Catch2 test suite checking the conversion is actually correct, built and sanitizer-checked on every push via GitHub Actions.
+A small int8 quantization validator in C++: converting float32 values to int8 and back (and a quantized "multiply" op), with a Catch2 test suite checking the conversion is actually correct, built and sanitizer-checked on every push via GitHub Actions.
 
 ## Why this exists
 
-Hardware accelerators are often fast specifically because they run low-precision integer arithmetic (int8) rather than full float32 — less data to move, simpler circuits, lower power. So AI framework code that targets an accelerator needs to **quantize** float32 values down to int8, and **dequantize** them back, while keeping track of how much precision that costs. This is a small, honest version of that conversion step, deliberately kept to plain arithmetic rather than anything accelerator-specific — the point is validating a conversion that real framework code performs constantly, not reproducing real accelerator kernels.
+Hardware accelerators are often fast specifically because they run low-precision integer arithmetic (int8) rather than full float32 — less data to move, simpler circuits, lower power. So AI framework code that targets an accelerator needs to **quantize** float32 values down to int8, and **dequantize** them back, while keeping track of how much precision that costs. This is a small, version of that conversion step, deliberately kept to plain arithmetic rather than anything accelerator-specific — the point is validating a conversion that real framework code performs constantly, not reproducing real accelerator kernels.
 
 ## What's in here
 
@@ -39,11 +39,6 @@ return static_cast<int8_t>(q);
 
 Commit history (`git log -p`): commit 1 has the bug and its own two clamping checks already failing; commit 2 adds one line and turns all checks green. The Catch2 suite in `tests/` was added later, as a follow-up, and includes `"out-of-range values clamp instead of silently wrapping"` as a dedicated, permanent regression test for this same case.
 
-## Why no sanitizer catches this bug — verified, not assumed
-
-I originally claimed Clang's `-fsanitize=implicit-conversion` would flag this cast. I checked, rather than leaving that unverified: I built the exact failing expression (`int q = 200; static_cast<int8_t>(q);`) under five configurations — GCC and Clang UBSan, GCC ASan, Clang `implicit-conversion`, and Clang `implicit-signed-integer-truncation` specifically — via a throwaway CI job. **None of them flagged it.** That's consistent with the C++ standard, not a tooling gap: `static_cast<int8_t>(q)` is an *explicit* cast, and the result is *implementation-defined*, not undefined — there is no language rule being broken, so there is nothing for a sanitizer (which instruments rule violations) to detect. `-Wconversion` wouldn't catch it either, for the same reason: explicit casts are precisely how a programmer tells the compiler "I know this narrows, stop warning me."
-
-This is a logic bug, not a language-rule violation — the kind only a test that checks the actual resulting value can catch, which is exactly what the two clamping checks above do. The CI sanitizer job (GCC ASan+UBSan, Clang `implicit-conversion`) stays in this repo as a general regression guard against *other* bug classes it's actually built to catch (real UB, memory errors, genuine implicit narrowing) — not as a claim that it would have caught this specific one.
 
 ## Known limitations
 
