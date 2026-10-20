@@ -32,11 +32,12 @@ TEST_CASE("round trip stays within the expected rounding error", "[quantize][deq
 }
 
 TEST_CASE("out-of-range values clamp instead of silently wrapping", "[quantize][clamping][regression]") {
-  // Regression test for the original bug: quantize_value used to cast an
-  // out-of-range int straight to int8_t with no bounds check. 20.0f at
-  // scale=0.1 produces q=200, which is outside int8's [-128, 127] range;
-  // the unclamped version silently wrapped this to -56 instead of erroring
-  // or saturating. These two cases are exactly what caught that fault.
+  // Regression test for a bug deliberately included in the first commit
+  // (see README): quantize_value cast an out-of-range int straight to
+  // int8_t with no bounds check. 20.0f at scale=0.1 produces q=200, which
+  // is outside int8's [-128, 127] range; the unclamped version silently
+  // wrapped this to -56 instead of saturating. These two cases are
+  // exactly what caught it, in the same commit that introduced it.
   QuantParams qp{/*scale=*/0.1f, /*zero_point=*/0};
 
   SECTION("large positive value clamps to int8 max") {

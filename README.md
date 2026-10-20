@@ -20,7 +20,7 @@ Hardware accelerators are often fast specifically because they run low-precision
 
 ## A bug the test suite caught on the first commit
 
-The first commit's `quantize_value` computed the int8 value but never checked it was actually representable — the clamp simply wasn't written yet:
+The first commit's `quantize_value` deliberately omitted the range clamp, to demonstrate that the test suite in that same commit would catch it:
 
 ```cpp
 int q = static_cast<int>(std::round(x / qp.scale)) + qp.zero_point;
