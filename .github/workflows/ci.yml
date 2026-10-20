@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run Catch2 test suite (GCC)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -I. tests/test_quant_validator.cpp -o tests_bin
+          ./tests_bin
+      - name: Build and run the standalone demo
+        run: |
+          g++ -std=c++17 -Wall -Wextra quant_validator.cpp -o quant_validator
+          ./quant_validator
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ASan + UBSan (GCC)
+        run: |
+          g++ -std=c++17 -g -fsanitize=address,undefined -I. tests/test_quant_validator.cpp -o tests_asan_ubsan
+          ./tests_asan_ubsan
+      - name: Implicit-conversion sanitizer (Clang)
+        # This is the specific check relevant to this project's original bug:
+        # an out-of-range int->int8_t narrowing is implementation-defined, not
+        # UB, so plain UBSan would not have flagged it. Clang's
+        # implicit-conversion group (which includes
+        # implicit-signed-integer-truncation) does instrument it. Run here as
+        # a regression guard against the fixed code, not as a retroactive
+        # demonstration against history.
+        run: |
+          clang++ -std=c++17 -g -fsanitize=implicit-conversion -I. tests/test_quant_validator.cpp -o tests_implicit_conv
+          ./tests_implicit_conv
