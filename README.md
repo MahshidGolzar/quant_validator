@@ -18,20 +18,18 @@ Hardware accelerators are often fast specifically because they run low-precision
 - `quant_validator.cpp` — a small standalone demo with the same checks in plain pass/fail output and no test-framework dependency, for anyone who wants to run it with a single compiler command.
 - `.github/workflows/ci.yml` — builds and runs the test suite on every push: a plain GCC build, a GCC build under AddressSanitizer + UBSan, and a Clang build under `-fsanitize=implicit-conversion` (see below for why that specific sanitizer, not just UBSan).
 
-## Manual fault injection: proving the clamping tests actually catch an out-of-range value
+## A bug the test suite caught on the first commit
 
-After writing the test suite, I deliberately removed the range-clamping logic from `quantize_value` to check the tests would actually notice — the same manual fault-injection check used in `pytorch-parametric-swish` (not tool-driven mutation testing: one hand-written fault, no mutation score): introduce a known defect, confirm the tests fail, then restore the fix, as evidence the tests have real detection power rather than just happening to pass.
-
-The faulty version computed the int8 value but never checked it was actually representable:
+The first commit's `quantize_value` computed the int8 value but never checked it was actually representable — the clamp simply wasn't written yet:
 
 ```cpp
 int q = static_cast<int>(std::round(x / qp.scale)) + qp.zero_point;
 return static_cast<int8_t>(q);   // q might be outside [-128, 127]
 ```
 
-int8 can only represent -128 to 127. Converting an out-of-range `int` to `int8_t` via `static_cast` is **implementation-defined behaviour** in C++17 (not undefined behaviour — C++20 tightened this to mandatory two's-complement wraparound), and on this compiler it wraps silently rather than raising an error. Concretely: quantizing `20.0f` with this scale produced `q = 200`, and `static_cast<int8_t>(200)` came out as **-56**, not some obviously-broken giant number. A large, clearly-positive input silently became a plausible-looking, completely wrong *negative* value — exactly the kind of bug that's dangerous precisely because it doesn't look broken, and exactly why a test that checks the actual value is more reliable than reading the code.
+int8 can only represent -128 to 127. Converting an out-of-range `int` to `int8_t` via `static_cast` is **implementation-defined behaviour** in C++17 (not undefined behaviour — C++20 tightened this to mandatory two's-complement wraparound), and on this compiler it wraps silently rather than raising an error. Concretely: quantizing `20.0f` at `scale=0.1` produced `q = 200`, and `static_cast<int8_t>(200)` came out as **-56**, not some obviously-broken giant number. A large, clearly-positive input silently became a plausible-looking, completely wrong *negative* value — exactly the kind of bug that's dangerous precisely because it doesn't look broken.
 
-The two clamping tests (`"extreme positive value clamps to int8 max (127)"`, `"extreme ... min (-128)"`) failed against the faulty version, which is what caught it. The fix adds the missing bound:
+That same first commit already included the test suite, and two of its checks (`"extreme positive value clamps to int8 max (127)"`, `"extreme ... min (-128)"`) failed immediately against it. A second commit added the missing bound:
 
 ```cpp
 int q = static_cast<int>(std::round(x / qp.scale)) + qp.zero_point;
@@ -39,11 +37,13 @@ q = std::clamp(q, -128, 127);
 return static_cast<int8_t>(q);
 ```
 
-Commit history (`git log -p`): a first commit with the fault and the two clamping tests already failing, then a second commit that adds one line and turns all checks green. (That history is from the original hand-rolled `check()`-based suite; the Catch2 suite in `tests/` was added afterward as a follow-up, and includes `"out-of-range values clamp instead of silently wrapping"` as a dedicated, permanent regression test for this exact fault.)
+Commit history (`git log -p`): commit 1 has the bug and its own two clamping checks already failing; commit 2 adds one line and turns all checks green. The Catch2 suite in `tests/` was added later, as a follow-up, and includes `"out-of-range values clamp instead of silently wrapping"` as a dedicated, permanent regression test for this same case.
 
-## Why `-fsanitize=implicit-conversion`, not just UBSan
+## Why no sanitizer catches this bug — verified, not assumed
 
-The CI sanitizer job runs both GCC's combined ASan+UBSan build and a separate Clang build with `-fsanitize=implicit-conversion`. This is deliberate, not redundant: the original bug — an out-of-range `int` narrowed to `int8_t` — is **implementation-defined behaviour** in C++17, not undefined behaviour, so plain UBSan's default checks would not flag it. Clang's `implicit-conversion` group (which includes `implicit-signed-integer-truncation`) specifically instruments narrowing/truncating conversions regardless of UB status, which is the actual relevant tool for this bug class. Both sanitizer jobs currently run against the already-fixed code and pass cleanly — they're a regression guard going forward, not a retroactive demonstration against history.
+I originally claimed Clang's `-fsanitize=implicit-conversion` would flag this cast. I checked, rather than leaving that unverified: I built the exact failing expression (`int q = 200; static_cast<int8_t>(q);`) under five configurations — GCC and Clang UBSan, GCC ASan, Clang `implicit-conversion`, and Clang `implicit-signed-integer-truncation` specifically — via a throwaway CI job. **None of them flagged it.** That's consistent with the C++ standard, not a tooling gap: `static_cast<int8_t>(q)` is an *explicit* cast, and the result is *implementation-defined*, not undefined — there is no language rule being broken, so there is nothing for a sanitizer (which instruments rule violations) to detect. `-Wconversion` wouldn't catch it either, for the same reason: explicit casts are precisely how a programmer tells the compiler "I know this narrows, stop warning me."
+
+This is a logic bug, not a language-rule violation — the kind only a test that checks the actual resulting value can catch, which is exactly what the two clamping checks above do. The CI sanitizer job (GCC ASan+UBSan, Clang `implicit-conversion`) stays in this repo as a general regression guard against *other* bug classes it's actually built to catch (real UB, memory errors, genuine implicit narrowing) — not as a claim that it would have caught this specific one.
 
 ## Known limitations
 
