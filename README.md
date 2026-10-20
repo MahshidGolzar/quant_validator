@@ -14,18 +14,20 @@ Hardware accelerators are often fast specifically because they run low-precision
 - `quantized_multiply` — a small quantized elementwise multiply "op", the kind of thing a framework's accelerator backend implements for a layer. For readability this dequantizes, multiplies in float, then re-quantizes the result; a real accelerator kernel computes the mathematical equivalent in pure integer arithmetic for speed.
 - A tiny test "framework" (`check()`, pass/fail reporting) with 10 checks: round-trip accuracy within the expected rounding error, out-of-range clamping, and the quantized multiply op checked against the plain float32 reference calculation.
 
-## The bug this project's tests caught
+## Mutation testing: proving the clamping tests actually catch an out-of-range value
 
-The first version of `quantize_value` computed the int8 value but never checked it was actually representable:
+After writing the test suite, I deliberately removed the range-clamping logic from `quantize_value` to check the tests would actually notice — the same **mutation testing** approach used in `pytorch-parametric-swish`: introduce a known defect, confirm the tests fail, then restore the fix, as evidence the tests have real detection power rather than just happening to pass.
+
+The mutated version computed the int8 value but never checked it was actually representable:
 
 ```cpp
 int q = static_cast<int>(std::round(x / qp.scale)) + qp.zero_point;
-return static_cast<int8_t>(q);   // BUG: q might be outside [-128, 127]
+return static_cast<int8_t>(q);   // q might be outside [-128, 127]
 ```
 
-int8 can only represent -128 to 127. Casting an out-of-range `int` down to `int8_t` doesn't raise an error or produce an obviously-wrong number — it silently wraps around. Concretely: quantizing `20.0f` with this scale produced `q = 200`, and `static_cast<int8_t>(200)` came out as **-56**, not some obviously-broken giant number. A large, clearly-positive input silently became a plausible-looking, completely wrong *negative* value — exactly the kind of bug that's dangerous precisely because it doesn't look broken.
+int8 can only represent -128 to 127. Converting an out-of-range `int` to `int8_t` via `static_cast` is **implementation-defined behaviour** in C++17 (not undefined behaviour — C++20 tightened this to mandatory two's-complement wraparound), and on this compiler it wraps silently rather than raising an error. Concretely: quantizing `20.0f` with this scale produced `q = 200`, and `static_cast<int8_t>(200)` came out as **-56**, not some obviously-broken giant number. A large, clearly-positive input silently became a plausible-looking, completely wrong *negative* value — exactly the kind of bug that's dangerous precisely because it doesn't look broken, and exactly why a test that checks the actual value is more reliable than reading the code.
 
-The two clamping tests (`"extreme positive value clamps to int8 max (127)"`, `"extreme ... min (-128)"`) failed against this version, which is what caught it. The fix adds the missing bound:
+The two clamping tests (`"extreme positive value clamps to int8 max (127)"`, `"extreme ... min (-128)"`) failed against the mutated version, which is what caught it. The fix adds the missing bound:
 
 ```cpp
 int q = static_cast<int>(std::round(x / qp.scale)) + qp.zero_point;
@@ -33,12 +35,13 @@ q = std::clamp(q, -128, 127);
 return static_cast<int8_t>(q);
 ```
 
-The real commit history (`git log -p`) shows this: a first commit with the bug and the two clamping tests already failing, then a second commit that adds one line and turns all 10 checks green.
+The real commit history (`git log -p`) shows this: a first commit with the mutant and the two clamping tests already failing, then a second commit that adds one line and turns all 10 checks green.
 
 ## Known limitations
 
 - `quantized_multiply` dequantizes to float internally rather than doing the integer-only arithmetic a real accelerator kernel would use — chosen deliberately for readability over realism.
 - Only elementwise multiply is implemented; no quantized add, matmul, or convolution.
+- Not yet built or run under a sanitizer (Clang/GCC's `-fsanitize=implicit-conversion` or `-Wconversion` would be the natural tool to flag the narrowing cast this project's bug involved) — not done here because only MSVC, which lacks these specific checks, was available while building this.
 - Single, fixed quantization parameters per tensor (no per-channel scales, which real frameworks often use for better accuracy).
 
 ## Building and running
